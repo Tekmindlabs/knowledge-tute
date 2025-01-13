@@ -10,3 +10,9 @@ export interface ChatResponse {
   message?: Message;
   error?: string;
 }
+
+export interface Attachment {
+  url: string;
+  name: string;
+  contentType: string;
+}
