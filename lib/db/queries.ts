@@ -1,4 +1,3 @@
-// lib/db/queries.ts
 import { prisma } from '@/lib/prisma';
 import { VisibilityType } from '@/components/visibility-selector';
 
