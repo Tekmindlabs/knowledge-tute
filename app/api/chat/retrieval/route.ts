@@ -1,19 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Message as VercelChatMessage, StreamingTextResponse } from "ai";
-
-import { createClient } from "@supabase/supabase-js";
-
-import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { PromptTemplate } from "@langchain/core/prompts";
-import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
 import { Document } from "@langchain/core/documents";
 import { RunnableSequence } from "@langchain/core/runnables";
 import {
   BytesOutputParser,
   StringOutputParser,
 } from "@langchain/core/output_parsers";
+import { getMilvusClient } from "@/lib/milvus/client";
+import { embeddings } from "@/lib/ai/config";
 
 export const runtime = "edge";
+
+const COLLECTION_NAME = "content_vectors";
 
 const combineDocumentsFn = (docs: Document[]) => {
   const serializedDocs = docs.map((doc) => doc.pageContent);
@@ -41,6 +41,7 @@ const CONDENSE_QUESTION_TEMPLATE = `Given the following conversation and a follo
 
 Follow Up Input: {question}
 Standalone question:`;
+
 const condenseQuestionPrompt = PromptTemplate.fromTemplate(
   CONDENSE_QUESTION_TEMPLATE,
 );
@@ -59,14 +60,26 @@ Answer the question based only on the following context and chat history:
 
 Question: {question}
 `;
+
 const answerPrompt = PromptTemplate.fromTemplate(ANSWER_TEMPLATE);
 
-/**
- * This handler initializes and calls a retrieval chain. It composes the chain using
- * LangChain Expression Language. See the docs for more information:
- *
- * https://js.langchain.com/v0.2/docs/how_to/qa_chat_history_how_to/
- */
+async function searchSimilarDocuments(query: string): Promise<Document[]> {
+  const client = await getMilvusClient();
+  const queryEmbedding = await embeddings.embedQuery(query);
+
+  const searchResponse = await client.search({
+    collection_name: COLLECTION_NAME,
+    vector: queryEmbedding,
+    limit: 5,
+    output_fields: ["content", "metadata"],
+  });
+
+  return searchResponse.results.map(doc => new Document({
+    pageContent: doc.content,
+    metadata: JSON.parse(doc.metadata)
+  }));
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -74,30 +87,15 @@ export async function POST(req: NextRequest) {
     const previousMessages = messages.slice(0, -1);
     const currentMessageContent = messages[messages.length - 1].content;
 
-    const model = new ChatOpenAI({
-      model: "gpt-4o-mini",
+    const model = new ChatGoogleGenerativeAI({
+      modelName: "gemini-pro",
       temperature: 0.2,
+      maxOutputTokens: 2048,
+      topK: 40,
+      topP: 0.8,
+      streaming: true,
     });
 
-    const client = createClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_PRIVATE_KEY!,
-    );
-    const vectorstore = new SupabaseVectorStore(new OpenAIEmbeddings(), {
-      client,
-      tableName: "documents",
-      queryName: "match_documents",
-    });
-
-    /**
-     * We use LangChain Expression Language to compose two chains.
-     * To learn more, see the guide here:
-     *
-     * https://js.langchain.com/docs/guides/expression_language/cookbook
-     *
-     * You can also use the "createRetrievalChain" method with a
-     * "historyAwareRetriever" to get something prebaked.
-     */
     const standaloneQuestionChain = RunnableSequence.from([
       condenseQuestionPrompt,
       model,
@@ -109,17 +107,17 @@ export async function POST(req: NextRequest) {
       resolveWithDocuments = resolve;
     });
 
-    const retriever = vectorstore.asRetriever({
-      callbacks: [
-        {
-          handleRetrieverEnd(documents) {
-            resolveWithDocuments(documents);
-          },
-        },
-      ],
-    });
+    // Custom retriever function using Milvus
+    const retriever = async (query: string) => {
+      const documents = await searchSimilarDocuments(query);
+      resolveWithDocuments(documents);
+      return documents;
+    };
 
-    const retrievalChain = retriever.pipe(combineDocumentsFn);
+    const retrievalChain = async (query: string) => {
+      const docs = await retriever(query);
+      return combineDocumentsFn(docs);
+    };
 
     const answerChain = RunnableSequence.from([
       {
@@ -167,6 +165,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (e: any) {
+    console.error("Error in chat retrieval:", e);
     return NextResponse.json({ error: e.message }, { status: e.status ?? 500 });
   }
 }

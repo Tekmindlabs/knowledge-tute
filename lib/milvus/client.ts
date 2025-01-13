@@ -1,7 +1,5 @@
-import { MilvusClient } from '@zilliz/milvus2-sdk-node';
-
-const MILVUS_ADDRESS = process.env.MILVUS_ADDRESS;
-const MILVUS_TOKEN = process.env.MILVUS_TOKEN;
+// lib/milvus/client.ts
+import { MilvusClient } from "@zilliz/milvus2-sdk-node";
 
 class MilvusConnection {
   private static instance: MilvusClient;
@@ -10,20 +8,29 @@ class MilvusConnection {
 
   public static async getInstance(): Promise<MilvusClient> {
     if (!MilvusConnection.instance) {
-      if (!MILVUS_ADDRESS || !MILVUS_TOKEN) {
-        throw new Error('Milvus configuration missing: MILVUS_ADDRESS and MILVUS_TOKEN are required');
+      const address = process.env.MILVUS_ADDRESS;
+      const token = process.env.MILVUS_TOKEN;
+
+      if (!address || !token) {
+        throw new Error('Milvus configuration missing. Please check MILVUS_ADDRESS and MILVUS_TOKEN in environment variables.');
       }
 
+      // Remove 'https://' from the address if present
+      const cleanAddress = address.replace('https://', '');
+
       const config = {
-        address: MILVUS_ADDRESS.replace('https://', ''), // Remove https:// if present
-        token: MILVUS_TOKEN,
-        ssl: true // Always true for cloud cluster
+        address: cleanAddress,
+        token: token,
+        ssl: true
       };
 
       MilvusConnection.instance = new MilvusClient(config);
     }
+
     return MilvusConnection.instance;
   }
 }
 
-export const getMilvusClient = () => MilvusConnection.getInstance();
+export async function getMilvusClient(): Promise<MilvusClient> {
+  return MilvusConnection.getInstance();
+}
