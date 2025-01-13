@@ -1,4 +1,5 @@
-import type { NextAuthConfig } from "next-auth";
+import { getServerSession } from "next-auth";
+import { NextAuthConfig } from "next-auth";
 
 export const authConfig = {
   pages: {
@@ -8,7 +9,7 @@ export const authConfig = {
     authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
       const isOnDashboard = nextUrl.pathname.startsWith("/dashboard");
-      
+
       if (isOnDashboard) {
         if (isLoggedIn) return true;
         return false;
@@ -20,3 +21,8 @@ export const authConfig = {
   },
   providers: [],
 } satisfies NextAuthConfig;
+
+// Add this new function
+export async function auth() {
+  return await getServerSession(authConfig);
+}
