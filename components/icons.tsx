@@ -1,8 +1,7 @@
 import {
   Facebook,
   Github,
-  LucideIcon,
-  PanelLeft, // Add this import
+  LucideIcon, // Use LucideIcon instead of Icon
 } from "lucide-react";
 
 export type Icon = LucideIcon; // Use LucideIcon as the type
