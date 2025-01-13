@@ -2,11 +2,7 @@
 
 import type { User } from 'next-auth';
 import { useRouter } from 'next/navigation';
-
-import { PlusIcon } from '@/components/icons';
-import { SidebarHistory } from '@/components/sidebar-history';
-import { SidebarUserNav } from '@/components/sidebar-user-nav';
-import { Button } from '@/components/ui/button';
+import Link from 'next/link';
 import {
   Sidebar,
   SidebarContent,
@@ -15,8 +11,57 @@ import {
   SidebarMenu,
   useSidebar,
 } from '@/components/ui/sidebar';
-import Link from 'next/link';
-import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+
+// Add PlusIcon component if not already defined
+const PlusIcon = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+);
+
+// Add SidebarHistory component
+const SidebarHistory = ({ user }: { user: User | undefined }) => {
+  return (
+    <div className="flex-1 overflow-auto">
+      {/* Add your history implementation here */}
+    </div>
+  );
+};
+
+// Add SidebarUserNav component
+const SidebarUserNav = ({ user }: { user: User | undefined }) => {
+  return (
+    <div className="flex items-center justify-between p-4">
+      <div className="flex items-center gap-2">
+        {user?.image && (
+          <img
+            src={user.image}
+            alt={user.name || 'User'}
+            className="h-8 w-8 rounded-full"
+          />
+        )}
+        <span>{user?.name}</span>
+      </div>
+    </div>
+  );
+};
 
 export function AppSidebar({ user }: { user: User | undefined }) {
   const router = useRouter();
