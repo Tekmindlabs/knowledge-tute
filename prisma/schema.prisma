@@ -98,11 +98,23 @@ model Document {
   fileType  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  chunks    DocumentChunk[]
   user      User     @relation(fields: [userId], references: [id]) // Add this line
   
   @@index([userId])  // Add this line for better query performance
 }
 
+model DocumentChunk {
+  id        String   @id @default(cuid())
+  documentId String
+  document  Document @relation(fields: [documentId], references: [id])
+  content   String   @db.Text
+  index     Int
+  vectorId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
 model VectorStore {
   id         String   @id @default(cuid())
   userId     String

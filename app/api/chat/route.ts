@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Message } from '@/types/chat';
 import { MemoryService } from '@/lib/memory/memory-service';
-import { EmbeddingModel } from '@/lib/knowledge/embeddings';
+import { getEmbedding } from '@/lib/knowledge/embeddings';
 import { 
   ChatPromptTemplate, 
   MessagesPlaceholder,
@@ -15,10 +15,42 @@ import {
 import { RunnableSequence } from "@langchain/core/runnables";
 import { StringOutputParser } from "@langchain/core/output_parsers";
 import { createReactAgent, AgentExecutor } from "langchain/agents";
-import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
-import { GoogleVertexAIEmbeddings } from "@langchain/google-vertexai";
+import { Tool } from "langchain/tools";
+import { BaseLanguageModelInterface } from "langchain/base_language";
 
-// Keep existing type definitions...
+// Define processing steps
+enum STEPS {
+  INIT = 'initialization',
+  AUTH = 'authentication',
+  PROCESS = 'processing',
+  EMBED = 'embedding',
+  AGENT = 'agent_execution',
+  RESPONSE = 'response_generation',
+  STREAM = 'streaming'
+}
+
+// Google AI Model Wrapper for LangChain compatibility
+class GoogleAIModelWrapper implements BaseLanguageModelInterface {
+  constructor(private model: any) {}
+  
+  async invoke(input: string, options?: any) {
+    const result = await this.model.generateContent(input);
+    return result.response.text();
+  }
+
+  // Implement other required interface methods
+  async generate(prompts: string[], options?: any) {
+    const results = await Promise.all(
+      prompts.map(prompt => this.model.generateContent(prompt))
+    );
+    return {
+      generations: results.map(result => ({
+        text: result.response.text(),
+        generationInfo: {}
+      }))
+    };
+  }
+}
 
 const SYSTEM_TEMPLATE = `You are an intelligent tutoring assistant that helps users learn.
 Consider the following aspects when responding:
@@ -34,6 +66,35 @@ if (!process.env.GOOGLE_AI_API_KEY) {
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
 const requestCache = new Map<string, Response>();
 
+// Create custom retrieval tool
+class KnowledgeBaseSearchTool extends Tool {
+  name = "search_knowledge_base";
+  description = "Search through learning materials";
+
+  async _call(query: string): Promise<string> {
+    try {
+      // Search in PostgreSQL using embeddings
+      const queryEmbedding = await getEmbedding(query);
+      
+      // Perform vector similarity search using PostgreSQL
+      const similarDocuments = await prisma.$queryRaw`
+        SELECT content, 1 - (embedding <-> ${queryEmbedding}::vector) as similarity
+        FROM documents
+        WHERE 1 - (embedding <-> ${queryEmbedding}::vector) > 0.7
+        ORDER BY similarity DESC
+        LIMIT 3;
+      `;
+
+      return Array.isArray(similarDocuments) 
+        ? similarDocuments.map((doc: any) => doc.content).join("\n\n")
+        : "No relevant documents found";
+    } catch (error) {
+      console.error("Error searching knowledge base:", error);
+      return "Error searching knowledge base";
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   const runId = crypto.randomUUID();
   let currentStep = STEPS.INIT;
@@ -46,7 +107,6 @@ export async function POST(req: NextRequest) {
   }
   
   try {
-    // Authentication check (keep existing code)...
     currentStep = STEPS.AUTH;
     const session = await getServerSession(authConfig);
     if (!session?.user?.id) {
@@ -56,7 +116,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Message validation and user data retrieval (keep existing code)...
     const { messages }: { messages: Message[] } = await req.json();
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
@@ -68,13 +127,16 @@ export async function POST(req: NextRequest) {
       }
     });
 
-    // Initialize LangChain components
+    if (!user) {
+      throw new Error("User not found");
+    }
+
     const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const wrappedModel = new GoogleAIModelWrapper(model);
     const { stream, handlers } = LangChainStream({
       experimental_streamData: true
     });
 
-    // Create emotional analysis chain
     const emotionalAnalysisChain = RunnableSequence.from([
       ChatPromptTemplate.fromMessages([
         SystemMessagePromptTemplate.fromTemplate(
@@ -82,33 +144,15 @@ export async function POST(req: NextRequest) {
         ),
         new MessagesPlaceholder("messages")
       ]),
-      model,
+      wrappedModel,
       new StringOutputParser()
     ]);
 
-    // Initialize vector store
-    const embeddings = new GoogleVertexAIEmbeddings();
-    const vectorStore = new SupabaseVectorStore(embeddings, {
-      client: supabaseClient,
-      tableName: "documents",
-      queryName: "match_documents"
-    });
+    const searchTool = new KnowledgeBaseSearchTool();
 
-    // Create retriever tool
-    const retriever = vectorStore.asRetriever();
-    const retrievalTool = {
-      name: "search_knowledge_base",
-      description: "Search through learning materials",
-      func: async (query: string) => {
-        const docs = await retriever.getRelevantDocuments(query);
-        return docs.map(doc => doc.pageContent).join("\n\n");
-      }
-    };
-
-    // Create ReAct agent
     const agent = await createReactAgent({
-      llm: model,
-      tools: [retrievalTool],
+      llm: wrappedModel,
+      tools: [searchTool],
       prompt: ChatPromptTemplate.fromMessages([
         ["system", SYSTEM_TEMPLATE],
         new MessagesPlaceholder("chat_history"),
@@ -117,23 +161,20 @@ export async function POST(req: NextRequest) {
     });
 
     const executor = AgentExecutor.fromAgentAndTools({
-      agent,
-      tools: [retrievalTool],
+      agent: await agent,
+      tools: [searchTool],
       verbose: true
     });
 
-    // Process messages and analyze emotional state
     currentStep = STEPS.PROCESS;
     const emotionalState = await emotionalAnalysisChain.invoke({
       messages: messages
     });
 
-    // Generate embeddings for the latest message
     currentStep = STEPS.EMBED;
     const lastMessage = messages[messages.length - 1];
-    const embedding = await embeddings.embedQuery(lastMessage.content);
+    const embedding = await getEmbedding(lastMessage.content);
 
-    // Execute agent with context
     currentStep = STEPS.AGENT;
     const agentResponse = await executor.invoke({
       input: lastMessage.content,
@@ -141,7 +182,6 @@ export async function POST(req: NextRequest) {
       emotional_state: emotionalState
     });
 
-    // Personalize response
     currentStep = STEPS.RESPONSE;
     const personalizedResponse = await model.generateContent({
       contents: [{
@@ -158,11 +198,8 @@ export async function POST(req: NextRequest) {
       }]
     });
 
-    const finalResponse = personalizedResponse.response.text().trim();
+    const finalResponse = (await personalizedResponse.response).text().trim();
 
-    // Store chat in database (keep existing code)...
-    
-    // Stream response
     currentStep = STEPS.STREAM;
     const messageData: Message = {
       id: runId,

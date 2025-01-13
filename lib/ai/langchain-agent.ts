@@ -1,9 +1,10 @@
-// lib/ai/langchain-agent.ts
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
 import { RunnableSequence } from "@langchain/core/runnables";
 import { StringOutputParser } from "@langchain/core/output_parsers";
 import { AgentExecutor, createReactAgent } from "langchain/agents";
+import { Tool } from "langchain/tools";
+import { BaseLanguageModelInterface } from "langchain/base_language";
 import { Message } from "@/types/chat";
 import { AgentState, EmotionalState } from "./agents";
 
@@ -20,13 +21,65 @@ interface Memory {
   };
 }
 
+// Google AI Model Wrapper for LangChain compatibility
+class GoogleAIModelWrapper implements BaseLanguageModelInterface {
+  constructor(private model: any) {}
+  
+  async invoke(input: string, options?: any) {
+    const result = await this.model.generateContent(input);
+    return result.response.text();
+  }
+
+  async generate(prompts: string[], options?: any) {
+    const results = await Promise.all(
+      prompts.map(prompt => this.model.generateContent(prompt))
+    );
+    return {
+      generations: results.map(result => ({
+        text: result.response.text(),
+        generationInfo: {}
+      }))
+    };
+  }
+
+  // Implement other required interface methods
+  async call(prompt: string, options?: any) {
+    const result = await this.model.generateContent(prompt);
+    return result.response.text();
+  }
+
+  async predictMessages(messages: any[], options?: any) {
+    return this.call(messages.map(m => m.content).join('\n'), options);
+  }
+}
+
+// Custom Knowledge Base Search Tool
+class KnowledgeBaseSearchTool extends Tool {
+  name = "search_knowledge_base";
+  description = "Search through learning materials";
+  memoryService: any;
+
+  constructor(memoryService: any) {
+    super();
+    this.memoryService = memoryService;
+  }
+
+  async _call(query: string): Promise<string> {
+    return await this.memoryService.searchMemories(query);
+  }
+}
+
 export class LangChainGoogleAgent {
   private model: GoogleGenerativeAI;
   private memoryService: any;
+  private wrappedModel: GoogleAIModelWrapper;
 
   constructor(apiKey: string, memoryService: any) {
     this.model = new GoogleGenerativeAI(apiKey);
     this.memoryService = memoryService;
+    this.wrappedModel = new GoogleAIModelWrapper(
+      this.model.getGenerativeModel({ model: "gemini-pro" })
+    );
   }
 
   private createEmotionalAnalysisChain() {
@@ -41,12 +94,12 @@ export class LangChainGoogleAgent {
 
     return RunnableSequence.from([
       emotionalPrompt,
-      this.model.getGenerativeModel({ model: "gemini-pro" }),
+      this.wrappedModel,
       new StringOutputParser()
     ]);
   }
 
-  private createTutorAgent() {
+  private async createTutorAgent() {
     const prompt = ChatPromptTemplate.fromMessages([
       ["system", `You are an intelligent tutoring assistant that helps users learn.
         Consider:
@@ -58,24 +111,16 @@ export class LangChainGoogleAgent {
       new MessagesPlaceholder("agent_scratchpad")
     ]);
 
-    const tools = [
-      {
-        name: "search_knowledge_base",
-        description: "Search through learning materials",
-        func: async (query: string) => {
-          return await this.memoryService.searchMemories(query);
-        }
-      }
-    ];
+    const searchTool = new KnowledgeBaseSearchTool(this.memoryService);
 
     return createReactAgent({
-      llm: this.model.getGenerativeModel({ model: "gemini-pro" }),
-      tools,
+      llm: this.wrappedModel,
+      tools: [searchTool],
       prompt
     });
   }
 
-  async process(state: AgentState) {
+  async process(state: AgentState & { userId: string; context?: any }) {
     try {
       // 1. Analyze emotional state
       const emotionalChain = this.createEmotionalAnalysisChain();
@@ -84,10 +129,10 @@ export class LangChainGoogleAgent {
       });
 
       // 2. Create and run tutor agent
-      const agent = this.createTutorAgent();
+      const agent = await this.createTutorAgent();
       const executor = AgentExecutor.fromAgentAndTools({
-        agent,
-        tools: agent.tools,
+        agent: await agent,
+        tools: [new KnowledgeBaseSearchTool(this.memoryService)],
         verbose: true
       });
 

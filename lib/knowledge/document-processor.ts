@@ -8,21 +8,14 @@ import mammoth from 'mammoth';
 import { Document, VectorResult } from './types';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
+import { createReactAgent, AgentExecutor } from "langchain/agents";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { BaseLanguageModelInterface } from "langchain/base_language";
+import { Tool } from "langchain/tools";
 
-interface DocumentMetadata {
-  size: number;
-  lastModified: number;
-  fileType: string;
-  embeddingDimension?: number;
-  processingTimestamp: string;
-  previousVersions?: Array<{
-    version: number;
-    updatedAt: Date;
-  }>;
-  [key: string]: any; // Add this index signature
-}
-
-// Custom error types
+// Error classes
 class DocumentProcessingError extends Error {
   constructor(message: string) {
     super(message);
@@ -37,6 +30,21 @@ class TextExtractionError extends Error {
   }
 }
 
+// Interfaces
+interface DocumentMetadata {
+  size: number;
+  lastModified: number;
+  fileType: string;
+  embeddingDimension?: number;
+  processingTimestamp: string;
+  previousVersions?: Array<{
+    version: number;
+    updatedAt: Date;
+  }>;
+  analysis?: string;
+  chunkCount?: number;
+}
+
 // Supported file types
 const SUPPORTED_FILE_TYPES = {
   PDF: 'application/pdf',
@@ -45,44 +53,50 @@ const SUPPORTED_FILE_TYPES = {
   TXT: 'text/plain',
 };
 
-// Helper function to get proto path
-function getProtoPath() {
-  const isDevelopment = process.env.NODE_ENV === 'development';
-  const basePath = isDevelopment 
-    ? path.join(process.cwd(), 'public', 'proto') 
-    : path.join(process.cwd(), '.next', 'static', 'proto');
-  return path.join(basePath, 'schema.proto');
-}
-
-async function checkExistingDocument(
-  userId: string,
-  content: string,
-  fileName: string
-): Promise<Document | null> {
-  try {
-    const doc = await prisma.document.findFirst({
-      where: {
-        userId,
-        content,
-        title: fileName
-      }
-    });
-
-    if (!doc) return null;
-
-    return {
-      ...doc,
-      metadata: doc.metadata as Document['metadata']
-    } as Document;
-  } catch (error) {
-    console.error('Error checking existing document:', error);
-    return null;
+// Google AI Model Wrapper
+class GoogleAIModelWrapper implements BaseLanguageModelInterface {
+  constructor(private model: any) {}
+  
+  async invoke(input: string, options?: any) {
+    const result = await this.model.generateContent(input);
+    return result.response.text();
   }
 }
 
-// Add this helper function for type safety
+// Initialize LangChain components
+const model = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!).getGenerativeModel({ model: "gemini-pro" });
+const wrappedModel = new GoogleAIModelWrapper(model);
+
+// Create analysis tool
+const analyzeTool = new Tool({
+  name: "analyze_document",
+  description: "Analyze document content and structure",
+  async call(input: string) {
+    const result = await model.generateContent(input);
+    return result.response.text();
+  }
+});
+
+// Create agent
+const agent = await createReactAgent({
+  llm: wrappedModel,
+  tools: [analyzeTool],
+  prompt: ChatPromptTemplate.fromMessages([
+    ["system", "You are a document analysis agent that helps process and understand document content."],
+    new MessagesPlaceholder("chat_history"),
+    ["human", "{input}"]
+  ])
+});
+
+const executor = AgentExecutor.fromAgentAndTools({
+  agent: await agent,
+  tools: [analyzeTool],
+  verbose: true
+});
+
+// Helper functions
 function sanitizeMetadata(metadata: any): DocumentMetadata {
-  const sanitized: DocumentMetadata = {
+  return {
     size: Number(metadata.size) || 0,
     lastModified: Number(metadata.lastModified) || Date.now(),
     fileType: String(metadata.fileType) || '',
@@ -95,194 +109,10 @@ function sanitizeMetadata(metadata: any): DocumentMetadata {
       : [],
     ...(metadata.embeddingDimension && { 
       embeddingDimension: Number(metadata.embeddingDimension) 
-    })
+    }),
+    ...(metadata.analysis && { analysis: String(metadata.analysis) }),
+    ...(metadata.chunkCount && { chunkCount: Number(metadata.chunkCount) })
   };
-
-  return sanitized;
-}
-
-export async function processDocument(file: File, userId: string): Promise<Document> {
-  try {
-    console.log('🚀 Starting document processing:', {
-      fileName: file.name,
-      fileType: file.type,
-      fileSize: file.size,
-      userId,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Validate user
-    const user = await prisma.user.findUnique({
-      where: { id: userId }
-    });
-
-    if (!user) {
-      throw new DocumentProcessingError('Invalid user ID');
-    }
-
-    // Validate file type
-    if (!Object.values(SUPPORTED_FILE_TYPES).includes(file.type)) {
-      throw new DocumentProcessingError(`Unsupported file type: ${file.type}`);
-    }
-
-    // Use the correct proto path
-    const protoPath = getProtoPath();
-
-    // Extract text content with chunking if needed
-    const content = await extractText(file);
-    console.log('📄 Text extraction completed:', {
-      contentLength: content.length,
-      firstChars: content.substring(0, 100) + '...'
-    });
-    if (!content || content.trim().length === 0) {
-      throw new DocumentProcessingError('No content could be extracted from the file');
-    }
-    const existingDocument = await checkExistingDocument(userId, content, file.name);
-
-
-    if (existingDocument) {
-      const currentMetadata = existingDocument.metadata as DocumentMetadata;
-      const updatedMetadata = sanitizeMetadata({
-        ...currentMetadata,
-        previousVersions: [
-          ...(currentMetadata?.previousVersions || []),
-          {
-            version: existingDocument.version,
-            updatedAt: existingDocument.updatedAt
-          }
-        ],
-        lastModified: file.lastModified,
-        size: file.size,
-        processingTimestamp: new Date().toISOString()
-      });
-    
-      const updatedDocument = await prisma.document.update({
-        where: { id: existingDocument.id },
-        data: {
-          version: existingDocument.version + 1,
-          updatedAt: new Date(),
-          metadata: updatedMetadata as any // Type assertion to satisfy Prisma
-        }
-      });
-    
-      return {
-        ...updatedDocument,
-        metadata: updatedMetadata
-      } as Document;
-    }
-
-
-    // Generate embedding for new document
-
-    let embedding: number[];
-
-    try {
-      console.log('🔄 Starting embedding generation for document...');
-      const embeddingFloat32 = await getEmbedding(content);
-      
-      console.log('✨ Raw embedding generated:', {
-        type: embeddingFloat32.constructor.name,
-        length: embeddingFloat32.length
-      });
-      
-      embedding = Array.from(embeddingFloat32);
-      
-      console.log('✅ Embedding processed successfully:', {
-        dimension: embedding.length,
-        sampleValues: embedding.slice(0, 3)
-      });
-    } catch (error) {
-      console.error('❌ Error generating embedding:', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      throw new DocumentProcessingError(
-        `Failed to generate embedding: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
-    }
-
-    // Store document in Prisma with proper metadata
-    const newDocumentMetadata = sanitizeMetadata({
-      size: file.size,
-      lastModified: file.lastModified,
-      fileType: file.type,
-      embeddingDimension: embedding.length,
-      processingTimestamp: new Date().toISOString(),
-      previousVersions: []
-    });
-    
-    const document = await prisma.document.create({
-      data: {
-        userId,
-        title: file.name,
-        content: content.slice(0, 1000000),
-        fileType: file.type,
-        metadata: newDocumentMetadata as any, // Type assertion to satisfy Prisma
-        version: 1,
-        vectorId: null
-      },
-    });
-    console.log('💾 Document stored in database:', {
-      documentId: document.id,
-      title: document.title,
-      version: document.version
-    });
-
-    // Store vector in Milvus with validation
-    try {
-      const vectorResult = await insertVector({
-        userId,
-        contentType: 'document',
-        contentId: document.id,
-        embedding,
-        metadata: {
-          title: file.name,
-          fileType: file.type,
-          documentId: document.id
-        }
-      });
-      console.log('🔵 Vector stored in Milvus:', {
-        vectorId: vectorResult.id,
-        documentId: document.id
-      });
-
-      // Update document with vector ID
-      const updatedDocument = await prisma.document.update({
-        where: { id: document.id },
-        data: { vectorId: vectorResult.id }
-      });
-
-      // Create relationships with error handling
-      await createDocumentRelationships(document.id, content, userId).catch(error => {
-        console.error('Warning: Failed to create relationships:', error);
-      });
-
-      return {
-        id: updatedDocument.id,
-        title: updatedDocument.title,
-        content: updatedDocument.content,
-        userId: updatedDocument.userId,
-        vectorId: updatedDocument.vectorId,
-        fileType: updatedDocument.fileType,
-        metadata: updatedDocument.metadata ? 
-          (typeof updatedDocument.metadata === 'object' ? sanitizeMetadata(updatedDocument.metadata) : null) : null,
-        version: updatedDocument.version,
-        createdAt: updatedDocument.createdAt,
-        updatedAt: updatedDocument.updatedAt
-      };
-    } catch (error) {
-      // Clean up document if vector storage fails
-      await prisma.document.delete({ where: { id: document.id } });
-      throw new DocumentProcessingError(
-        `Failed to store vector: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
-    }
-  } catch (error) {
-    console.error('Error processing document:', error);
-    throw error instanceof DocumentProcessingError ? error : new DocumentProcessingError(
-      `Document processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-  }
 }
 
 async function extractText(file: File): Promise<string> {
@@ -303,20 +133,15 @@ async function extractText(file: File): Promise<string> {
 
 async function extractPdfText(buffer: ArrayBuffer): Promise<string> {
   try {
-    console.log('📑 Starting PDF text extraction');
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-    console.log(`📄 Processing PDF with ${pdf.numPages} pages`);
     let text = '';
-
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
       text += content.items.map((item: any) => item.str).join(' ') + '\n';
     }
-    console.log('✅ PDF text extraction completed');
     return text.trim();
   } catch (error) {
-    console.error('❌ PDF extraction error:', error);
     throw new TextExtractionError(
       `Failed to extract text from PDF: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
@@ -345,37 +170,112 @@ async function extractTxtText(buffer: ArrayBuffer): Promise<string> {
   }
 }
 
+async function splitTextIntoChunks(text: string): Promise<string[]> {
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize: 1000,
+    chunkOverlap: 200
+  });
+  
+  const docs = await splitter.createDocuments([text]);
+  return docs.map(doc => doc.pageContent);
+}
+
+// Main document processing functions
+export async function processDocument(file: File, userId: string): Promise<Document> {
+  try {
+    if (!Object.values(SUPPORTED_FILE_TYPES).includes(file.type)) {
+      throw new DocumentProcessingError(`Unsupported file type: ${file.type}`);
+    }
+
+    const content = await extractText(file);
+    const textChunks = await splitTextIntoChunks(content);
+    
+    const analysis = await executor.invoke({
+      input: content.substring(0, 1000),
+      chat_history: []
+    });
+
+    const embeddings = await Promise.all(
+      textChunks.map(chunk => getEmbedding(chunk))
+    );
+
+    const documentMetadata = sanitizeMetadata({
+      size: file.size,
+      lastModified: file.lastModified,
+      fileType: file.type,
+      embeddingDimension: embeddings[0].length,
+      processingTimestamp: new Date().toISOString(),
+      previousVersions: [],
+      analysis: analysis.output,
+      chunkCount: textChunks.length
+    });
+
+    const document = await prisma.document.create({
+      data: {
+        userId,
+        title: file.name,
+        content: content,
+        fileType: file.type,
+        metadata: documentMetadata as any,
+        version: 1,
+        vectorId: null
+      }
+    });
+
+    const vectorPromises = textChunks.map((chunk, index) => 
+      insertVector({
+        userId,
+        contentType: 'document_chunk',
+        contentId: `${document.id}_${index}`,
+        embedding: Array.from(embeddings[index]),
+        metadata: {
+          documentId: document.id,
+          chunkIndex: index,
+          title: file.name
+        }
+      })
+    );
+
+    const vectorResults = await Promise.all(vectorPromises);
+
+    await createDocumentRelationships(document.id, content, userId, analysis.output);
+
+    return {
+      ...document,
+      metadata: documentMetadata
+    } as Document;
+
+  } catch (error) {
+    console.error('Error processing document:', error);
+    throw error instanceof DocumentProcessingError ? error : new DocumentProcessingError(
+      `Document processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
 async function createDocumentRelationships(
   documentId: string,
   content: string,
-  userId: string
+  userId: string,
+  analysis: string
 ): Promise<void> {
   try {
-    console.log('🔍 Starting relationship creation for document:', { documentId });
-    
+    const relationshipAnalysis = await executor.invoke({
+      input: `Analyze potential relationships in this content and analysis:
+              Content: ${content.substring(0, 500)}...
+              Analysis: ${analysis}`,
+      chat_history: []
+    });
+
     const embeddingFloat32 = await getEmbedding(content);
-    console.log('✅ Relationship embedding generated');
-    
     const similar = await searchSimilarContent({
       userId,
       embedding: Array.from(embeddingFloat32),
       limit: 3,
       contentTypes: ['document']
     });
-    
-    console.log('🔎 Similar documents found:', {
-      count: Array.isArray(similar) ? similar.length : 0,
-      documents: Array.isArray(similar) ? 
-        similar.map(s => ({ id: s.content_id, score: s.score })) : []
-    });
 
-    // Add validation to ensure similar is an array
-    if (!Array.isArray(similar)) {
-      console.warn('searchSimilarContent did not return an array:', similar);
-      return; // Exit early if no valid results
-    }
-
-    const relationshipPromises = similar.map((result: { content_id: string; score: number }) => {
+    const relationshipPromises = similar.map(async (result: { content_id: string; score: number }) => {
       if (result.content_id !== documentId) {
         return createRelationship({
           userId,
@@ -385,23 +285,16 @@ async function createDocumentRelationships(
           metadata: {
             similarity_score: result.score,
             type: 'document-similarity',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            analysis: relationshipAnalysis.output
           }
         });
       }
     });
 
     await Promise.all(relationshipPromises.filter(Boolean));
-    
-    // After relationships are created
-    console.log('🔗 Document relationships created successfully');
   } catch (error) {
-    console.error('❌ Error creating relationships:', {
-      documentId,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
-    throw new Error(
-      `Failed to create document relationships: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    console.error('Error creating relationships:', error);
+    throw error;
   }
 }
