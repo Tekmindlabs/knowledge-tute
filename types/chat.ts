@@ -16,3 +16,9 @@ export interface Attachment {
   name: string;
   contentType: string;
 }
+
+export interface ChatRequestOptions {
+  data?: Record<string, any>;
+  options?: Record<string, any>;
+  headers?: Record<string, string>;
+}

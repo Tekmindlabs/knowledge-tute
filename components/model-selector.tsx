@@ -1,75 +1,66 @@
-'use client';
-
+// model-selector.tsx
 import { startTransition, useMemo, useOptimistic, useState } from 'react';
-
-import { saveModelId } from '@/app/(chat)/actions';
+import { CheckCircle, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
-import { models } from '@/lib/ai/models';
+import { models, type Model } from '@/lib/ai/models';
 import { cn } from '@/lib/utils';
 
-import { CheckCircleFillIcon, ChevronDownIcon } from './icons';
-
-export function ModelSelector({
-  selectedModelId,
-  className,
-}: {
+interface ModelSelectorProps {
   selectedModelId: string;
-} & React.ComponentProps<typeof Button>) {
+  className?: string;
+}
+
+export function ModelSelector({ selectedModelId, className }: ModelSelectorProps) {
   const [open, setOpen] = useState(false);
-  const [optimisticModelId, setOptimisticModelId] =
-    useOptimistic(selectedModelId);
+  const [optimisticModelId, setOptimisticModelId] = useOptimistic(
+    selectedModelId
+  );
 
   const selectedModel = useMemo(
-    () => models.find((model) => model.id === optimisticModelId),
-    [optimisticModelId],
+    () => models.find((model: Model) => model.id === optimisticModelId),
+    [optimisticModelId]
   );
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger
-        asChild
-        className={cn(
-          'w-fit data-[state=open]:bg-accent data-[state=open]:text-accent-foreground',
-          className,
-        )}
-      >
-        <Button variant="outline" className="md:px-2 md:h-[34px]">
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" className={cn('w-full', className)}>
           {selectedModel?.label}
-          <ChevronDownIcon />
+          <ChevronDown className="ml-2 h-4 w-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[300px]">
-        {models.map((model) => (
+        {models.map((model: Model) => (
           <DropdownMenuItem
             key={model.id}
+            className={cn(
+              'flex items-center justify-between',
+              model.id === optimisticModelId && 'bg-accent'
+            )}
             onSelect={() => {
-              setOpen(false);
-
+              setOptimisticModelId(model.id);
               startTransition(() => {
-                setOptimisticModelId(model.id);
-                saveModelId(model.id);
+                // Implement your save logic here
               });
             }}
-            className="gap-4 group/item flex flex-row justify-between items-center"
-            data-active={model.id === optimisticModelId}
           >
-            <div className="flex flex-col gap-1 items-start">
-              {model.label}
+            <div className="flex flex-col">
+              <span>{model.label}</span>
               {model.description && (
-                <div className="text-xs text-muted-foreground">
+                <span className="text-xs text-muted-foreground">
                   {model.description}
-                </div>
+                </span>
               )}
             </div>
-            <div className="text-foreground dark:text-foreground opacity-0 group-data-[active=true]/item:opacity-100">
-              <CheckCircleFillIcon />
-            </div>
+            {model.id === optimisticModelId && (
+              <CheckCircle className="h-4 w-4" />
+            )}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

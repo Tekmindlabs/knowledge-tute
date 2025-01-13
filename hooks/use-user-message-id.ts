@@ -1,11 +1,10 @@
-import { create } from 'zustand';
+'use client';
 
-interface UserMessageIdState {
-  userMessageId: string | null;
-  setUserMessageIdFromServer: (id: string) => void;
+import useSWR from 'swr';
+
+export function useUserMessageId() {
+  const { data: userMessageIdFromServer, mutate: setUserMessageIdFromServer } =
+    useSWR('userMessageIdFromServer', null);
+
+  return { userMessageIdFromServer, setUserMessageIdFromServer };
 }
-
-export const useUserMessageId = create<UserMessageIdState>((set) => ({
-  userMessageId: null,
-  setUserMessageIdFromServer: (id) => set({ userMessageId: id }),
-}));
